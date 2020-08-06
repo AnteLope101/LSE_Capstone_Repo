@@ -1,0 +1,875 @@
+---
+title: "DataAnalysis_R_Capstone"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+```{r}
+library(readr)
+library(quanteda)
+library("quanteda.dictionaries")
+library(dplyr)
+library(lme4)
+library(glmmTMB)
+library(survival)
+library(ggplot2)
+library(sjPlot)
+library(boot)
+library(parallel)
+```
+
+
+
+# Data Analysis: Quantity
+
+## Data Preparation
+```{r}
+all_data = read_csv('processed_data/Quantity_full_data_sample.csv')
+
+## Add source type
+all_sources <- read_csv('processed_data/all_sources.csv')
+
+add_source_type <- function(data, all_sources) {
+  sci_sources <- all_sources$source[all_sources$type == 'specialist']
+  data$source_type <-  NA
+  for (i in seq(nrow(data))) {
+    data$source_type[i] <- ifelse(data$source[i] %in% sci_sources,
+                                  "specialist", "generalist")
+  }
+  return (data)
+}
+
+all_data <- add_source_type(all_data, all_sources)
+
+
+```
+
+
+## Total Counts of Names
+```{r}
+table(all_data$gender, all_data$source_type)
+```
+
+
+
+## Run Poisson Regression - Full data sample
+```{r}
+grouped_data <- all_data %>% 
+                  group_by(source, url) %>%
+                  summarise(female_counts = table(gender)['female'],
+                            male_counts = table(gender)['male']) %>%
+                  replace(is.na(.), 0)
+
+grouped_data <- add_source_type(grouped_data, all_sources)
+grouped_data$source <- factor(grouped_data$source)
+
+
+overdisp_fun <- function(model) {
+    rdf <- df.residual(model)
+    rp <- residuals(model,type="pearson")
+    Pearson.chisq <- sum(rp^2)
+    prat <- Pearson.chisq/rdf
+    pval <- pchisq(Pearson.chisq, df=rdf, lower.tail=FALSE)
+    c(chisq=Pearson.chisq,ratio=prat,rdf=rdf,p=pval)
+}
+
+poissonFemaleOD <- glmer(female_counts ~ 1 + (1|source), 
+                         data = grouped_data, family = poisson(link = "log"))
+poissonMaleOD <- glmer(male_counts ~ 1 + (1|source), 
+                       data = grouped_data, family = poisson(link = "log"))
+## Shows that data is overdispersed
+overdisp_fun(poissonFemaleOD)  
+overdisp_fun(poissonMaleOD) 
+
+
+
+poissonFemale1 <- glmmTMB(female_counts ~ 1 + (1|source), 
+                          data = grouped_data, family = "nbinom2")
+poissonFemale1a <- glmmTMB(female_counts ~ 1, 
+                          data = grouped_data, family = "nbinom2")
+
+poissonMale1 <- glmmTMB(male_counts ~ 1 + (1|source), 
+                        data = grouped_data, family = "nbinom2")
+poissonMale1a <- glmmTMB(male_counts ~ 1, 
+                         data = grouped_data, family = "nbinom2")
+
+
+poissonFemale <- glmmTMB(female_counts ~ 1 + source_type + (1|source), 
+                          data = grouped_data, family = "nbinom2")
+poissonMale <- glmmTMB(male_counts ~ 1 + source_type + (1|source), 
+                       data = grouped_data, family = "nbinom2")
+
+```
+
+
+
+### Run Poisson Regression - Included 'scientists' only in data sample
+```{r}
+## Create dataset
+all_data_sci <- all_data[all_data$scientist == 1,]
+
+grouped_data_sci <- all_data_sci %>% 
+                      group_by(source, url) %>%
+                      summarise(female_counts = table(gender)['female'],
+                                male_counts = table(gender)['male']) %>%
+                      replace(is.na(.), 0)
+
+grouped_data_sci <- add_source_type(grouped_data_sci, all_sources)
+grouped_data_sci$source <- factor(grouped_data_sci$source)
+
+
+## Total counts
+table(all_data_sci$gender, all_data_sci$source_type)
+
+
+## Poisson regression
+poissonFemale1_sci <- glmmTMB(female_counts ~ 1 + (1|source), 
+                              data = grouped_data_sci, family = "nbinom2")
+poissonFemale1_scia <- glmmTMB(female_counts ~ 1, 
+                               data = grouped_data_sci, family = "nbinom2")
+
+poissonMale1_sci <- glmmTMB(male_counts ~ 1 + (1|source),
+                            data = grouped_data_sci, family = "nbinom2",
+                            control=glmmTMBControl(optimizer=optim,
+                                                   optArgs=list(method="BFGS")))
+poissonMale1_scia <- glmmTMB(male_counts ~ 1,
+                             data = grouped_data_sci, family = "nbinom2",
+                             control=glmmTMBControl(optimizer=optim,
+                                                    optArgs=list(method="BFGS")))
+
+
+poissonFemale_sci <- glmmTMB(female_counts ~ 1 + source_type + (1|source), 
+                             data = grouped_data_sci, family = "nbinom2")
+poissonMale_sci <- glmmTMB(male_counts ~ 1 + source_type + (1|source), 
+                           data = grouped_data_sci, family = "nbinom2",
+                           control=glmmTMBControl(optimizer=optim,
+                                                  optArgs=list(method="BFGS")))
+
+```
+
+
+
+### Run Poisson Regression - Removed covid-19 articles from data sample
+```{r}
+## Create dataset
+covid_filter <- grep('\\b(covid.*19)|(coronavirus(es)?)|(quarantine.?)\\b',
+                      all_data$article_original, ignore.case = TRUE)
+
+all_data_covid <- all_data[-covid_filter,]
+
+grouped_data_covid <- all_data_covid %>% 
+                        group_by(source, url) %>%
+                        summarise(female_counts = table(gender)['female'],
+                                  male_counts = table(gender)['male']) %>%
+                        replace(is.na(.), 0)
+
+grouped_data_covid <- add_source_type(grouped_data_covid, all_sources)
+grouped_data_covid$source <- factor(grouped_data_covid$source)
+
+
+
+## Total counts
+table(all_data_covid$gender, all_data_covid$source_type)
+
+
+
+## Poisson regression
+poissonFemale1_covid <- glmmTMB(female_counts ~ 1 + (1|source), 
+                                data = grouped_data_covid, family = "nbinom2")
+poissonFemale1_covida <- glmmTMB(female_counts ~ 1, 
+                                 data = grouped_data_covid, family = "nbinom2")
+
+poissonMale1_covid <- glmmTMB(male_counts ~ 1 + (1|source), 
+                              data = grouped_data_covid, family = "nbinom2")
+poissonMale1_covida <- glmmTMB(male_counts ~ 1, 
+                               data = grouped_data_covid, family = "nbinom2")
+
+
+poissonFemale_covid <- glmmTMB(female_counts ~ 1 + source_type + (1|source), 
+                               data = grouped_data_covid, family = "nbinom2")
+poissonMale_covid <- glmmTMB(male_counts ~ 1 + source_type + (1|source), 
+                             data = grouped_data_covid, family = "nbinom2")
+
+```
+
+
+
+## All Quantity Results
+```{r}
+## Total counts
+tab_fd <- table(all_data$gender, all_data$source_type)
+
+tab_ss1 <- table(all_data_sci$gender, all_data_sci$source_type)
+tab_ss2 <- table(all_data_covid$gender, all_data_covid$source_type)
+
+tab_fd
+tab_ss1
+tab_ss2
+
+
+all_counts_data <- list(all_data, all_data_sci, all_data_covid)
+mf_ratios <- data.frame('total' = rep(NA, 3),
+                        'generalist' = rep(NA, 3),
+                        'specialist' = rep(NA, 3),
+                        row.names = c('full', 'sci', 'covid'))
+for (d in seq(length(all_counts_data))) {
+  tab <- table(all_counts_data[[d]]$gender,
+               all_counts_data[[d]]$source_type)
+  mf_ratios$total[d] <- sum(tab[2,])/sum(tab[1,])
+  mf_ratios$generalist[d] <- tab[2,1]/tab[1,1]
+  mf_ratios$specialist[d] <- tab[2,2]/tab[1,2]
+}
+
+mf_ratios
+
+
+## Mixed-effects negative binomial regression
+summary(poissonFemale1)
+summary(poissonMale1)
+summary(poissonFemale)
+summary(poissonMale)
+
+summary(poissonFemale1_sci)
+summary(poissonMale1_sci)
+summary(poissonFemale_sci)
+summary(poissonMale_sci)
+
+summary(poissonFemale1_covid)
+summary(poissonMale1_covid)
+summary(poissonFemale_covid)
+summary(poissonMale_covid)
+
+
+set.seed(1)
+numCores <- detectCores()
+cl <- makeCluster(numCores)
+clusterEvalQ(cl, library("glmmTMB"))
+
+set.seed(1)
+b_poiF1 <- bootMer(poissonFemale1, function(x) fixef(x)$cond, nsim=1000,
+                   parallel = 'multicore', ncpus = 6)
+set.seed(1)
+b_poiF1_sci <- bootMer(poissonFemale1_sci, function(x) fixef(x)$cond, nsim=1000,
+                       parallel = 'multicore', ncpus = 6)
+set.seed(1)
+b_poiF1_covid <- bootMer(poissonFemale1_covid, function(x) fixef(x)$cond,
+                         nsim=1000, parallel = 'multicore', ncpus = 6)
+
+set.seed(1)
+b_poiM1 <- bootMer(poissonMale1, function(x) fixef(x)$cond, nsim=1000,
+                   parallel = 'multicore', ncpus = 8)
+set.seed(1)
+b_poiM1_sci <- bootMer(poissonMale1_sci, function(x) fixef(x)$cond, nsim=1000,
+                       parallel = 'multicore', ncpus = 8)
+set.seed(1)
+b_poiM1_covid <- bootMer(poissonMale1_covid, function(x) fixef(x)$cond, nsim=1000,
+                         parallel = 'multicore', ncpus = 8)
+
+stopCluster(cl)
+
+## Create fixed-effects results dataframe
+create_results_df_poi <- function(b_poiF, b_poiM){
+  options(digits = 4)
+  stat <- data.frame(row.names = 'Intercept')
+  stat$Estimate_F <- b_poiF$t0
+  stat$SE_F <- apply(b_poiF$t, 2, sd)
+  stat$LCI_F <- boot.ci(b_poiF, type='perc')$percent[4]
+  stat$UCI_F <- boot.ci(b_poiF, type='perc')$percent[5]
+  stat$p_F <- min(c((1-apply(b_poiF$t<0, 2, mean))*2,
+                    (1-apply(b_poiF$t>0, 2, mean))*2))
+
+  stat$Estimate_M <- b_poiM$t0
+  stat$SE_M <- apply(b_poiM$t, 2, sd)
+  stat$LCI_M <- boot.ci(b_poiM, type='perc')$percent[4]
+  stat$UCI_M <- boot.ci(b_poiM, type='perc')$percent[5]
+  stat$p_M <- min(c((1-apply(b_poiM$t<0, 2, mean))*2,
+                    (1-apply(b_poiM$t>0, 2, mean))*2))
+
+  return(stat)
+}
+
+stat_poi <- create_results_df_poi(b_poiF1, b_poiM1)
+stat_poi_sci <- create_results_df_poi(b_poiF1_sci, b_poiM1_sci)
+stat_poi_covid <- create_results_df_poi(b_poiF1_covid, b_poiM1_covid)
+
+tab_df(stat_poi, use.viewer = FALSE)
+tab_df(stat_poi_sci, use.viewer = FALSE)
+tab_df(stat_poi_covid, use.viewer = FALSE)
+
+
+## Create random-effects data frame
+stat_ranef_poi <- data.frame(row.names = c('Variance', 'ICC'))
+stat_ranef_poi$FD_F <- c(unlist(summary(poissonFemale1)$varcor),
+                         performance::icc(poissonFemale1)[[1]])
+stat_ranef_poi$FD_M <- c(unlist(summary(poissonMale1)$varcor),
+                         performance::icc(poissonMale1)[[1]])
+stat_ranef_poi$SS1_F <- c(unlist(summary(poissonFemale1_sci)$varcor),
+                          performance::icc(poissonFemale1_sci)[[1]])
+stat_ranef_poi$SS1_M <- c(unlist(summary(poissonMale1_sci)$varcor),
+                          performance::icc(poissonMale1_sci)[[1]])
+stat_ranef_poi$SS2_F <- c(unlist(summary(poissonFemale1_covid)$varcor),
+                          performance::icc(poissonFemale1_covid)[[1]])
+stat_ranef_poi$SS2_M <- c(unlist(summary(poissonMale1_covid)$varcor),
+                          performance::icc(poissonMale1_covid)[[1]])
+
+tab_df(stat_ranef_poi, use.viewer = FALSE)
+
+
+poissonAll <- list(poissonFemale1, poissonMale1,
+                   poissonFemale1_sci, poissonMale1_sci,
+                   poissonFemale1_covid, poissonMale1_covid)
+mf_poisson <- data.frame('female.intercept' = rep(NA, 3),
+                         'male.intercept' = rep(NA, 3),
+                         'female.expcounts' = rep(NA, 3),
+                         'male.expcounts' = rep(NA, 3),
+                         row.names = c('full', 'sci', 'covid'))
+for (i in seq(nrow(mf_poisson))) {
+  mf_poisson$female.intercept[i] <- fixef(poissonAll[[2 * i - 1]])$cond
+  mf_poisson$male.intercept[i] <- fixef(poissonAll[[2 * i]])$cond
+  mf_poisson$female.expcounts[i] <- exp(fixef(poissonAll[[2*i - 1]])$cond)
+  mf_poisson$male.expcounts[i] <- exp(fixef(poissonAll[[2*i]])$cond)
+}
+
+mf_poisson$mf_expcount_rt <- mf_poisson$male.expcounts/mf_poisson$female.expcounts
+mf_poisson
+
+
+anova(poissonFemale1, poissonFemale1a)
+anova(poissonMale1, poissonMale1a)
+
+anova(poissonFemale1_sci, poissonFemale1_scia)
+anova(poissonMale1_sci, poissonMale1_scia)
+
+anova(poissonFemale1_covid, poissonFemale1_covida)
+anova(poissonMale1_covid, poissonMale1_covida)
+
+## Plot results
+count_df <- data.frame('dataset' = c(rep('Full dataset', 4), 
+                                     rep('Sub-sample 1', 4), 
+                                     rep('Sub-sample 2', 4)),
+                       'web_type' = rep(c('generalist', 'specialist'), 6),
+                       'Gender' = rep(c('male', 'female'), times = 3, each = 2),
+                       'count' = c(tab_fd[2,], tab_fd[1,], 
+                                   tab_ss1[2,], tab_ss1[1,],
+                                   tab_ss2[2,], tab_ss2[1,]))
+
+pdf('graphs_capstone/counts_all.pdf', height = 4)
+ggplot(count_df, aes(fill = Gender, y = count, x = web_type)) + 
+  geom_bar(position="dodge", stat="identity") + 
+  facet_wrap(~dataset) +
+  labs(x = 'Type of website', y = 'Count of name mentions') + 
+  theme_bw()
+dev.off()
+
+stat_poi_covid
+```
+
+
+
+
+
+
+
+
+# Data Analysis: Quality
+
+## Multilevel Logistic Regression
+
+### Data Preparation
+```{r}
+
+all_data_stack <- read_csv('processed_data/processed_news_data123NNNN_stack.csv')
+
+
+# Remove person names from article segments
+remove_names <- function (segment, person) {
+  persons <- gsub('; ', ' ', person)
+  persons <- unlist(strsplit(persons, ' '))
+  persons <- sapply(persons, FUN=function (x) paste(x, 's?', sep=''))
+  pattern <- paste(persons, collapse = '|')
+  pattern <- paste('\\b(', pattern, ')\\b', sep = '')
+
+  segment_nn <- gsub(pattern, '', segment)
+  segment_nn <- gsub('\\[COMMON_NAME\\]', '', segment_nn) 
+  segment_nn <- gsub('\\[NON_FOCAL_NAME\\]', '', segment_nn) 
+  segment_nn <- gsub('\\[NON_SCI_NAME\\]', '', segment_nn) 
+
+  return(segment_nn)
+}
+remove_names <- Vectorize(remove_names)
+
+all_data_stack$segment_nn <- remove_names(all_data_stack$segment,
+                                          all_data_stack$person)
+all_data_stack$segment_nn <- unname(all_data_stack$segment_nn)
+
+```
+
+
+### Compute independent variables
+```{r}
+## Calculate no of words, readability, lexical diversity
+all_data_stack$segment_nn <-  gsub('[[:punct:]]+',' ',all_data_stack$segment_nn)
+all_data_stack$segment_nn <- gsub('[[:digit:]]+', '', all_data_stack$segment_nn)
+stack_corpus <- corpus(all_data_stack, text_field = 'segment_nn')
+num_words <- ntoken(stack_corpus)
+readability <- textstat_readability(stack_corpus, measure = 'Flesch.Kincaid')
+lex_div <- textstat_lexdiv(dfm(stack_corpus), measure = 'CTTR')
+
+
+## Visualise distributions of basic text properties to identify potential outliers
+plot(num_words)
+plot(readability$Flesch.Kincaid)
+plot(lex_div$CTTR)
+extr <- which(num_words > 350 | readability$Flesch.Kincaid > 100 |
+                readability$Flesch.Kincaid < 0 |
+                lex_div$CTTR > 7.5 | lex_div$CTTR < 1.5)
+all_data_stack <- all_data_stack[-extr,]
+stack_corpus <- corpus(all_data_stack, text_field = 'segment_nn')
+num_words <- num_words[-extr]
+readability <- readability[-extr,]
+lex_div <- lex_div[-extr,]
+
+
+## Create three gender categories
+mul_gen_inds <- which(all_data_stack$gender %in% c('female', 'male') == FALSE)
+male_gen_inds <- grep("^(?=;?\\bmale\\b;?)(?!.*\\bfemale\\b)",
+                      all_data_stack$gender[mul_gen_inds], perl = TRUE)
+female_gen_inds <- grep("^(?=;?\\bfemale\\b;?)(?!.*\\bmale\\b)",
+                        all_data_stack$gender[mul_gen_inds], perl = TRUE)
+
+all_data_stack$gender[mul_gen_inds][male_gen_inds] <- 'male'
+all_data_stack$gender[mul_gen_inds][female_gen_inds] <- 'female'
+
+both_gen_inds <- mul_gen_inds[-c(male_gen_inds, female_gen_inds)]
+all_data_stack$gender[both_gen_inds] <- 'both'
+
+table(all_data_stack$gender)  ## Check all gender categories
+
+
+## Compute 'average' scientist identity for segments with multiple person names
+mean_sci <- function(num_sci) {
+  num <- unlist(strsplit(num_sci, '; '))
+  num <- as.numeric(num)
+  mean_num <- mean(num)
+  sci_iden <- ifelse(mean_num > 0.5, 1, 0)
+  return(sci_iden)
+}
+
+ave_sci_iden <- sapply(all_data_stack$scientist[mul_gen_inds], 
+                       FUN = function(x) mean_sci(x))
+ave_sci_iden <- unname(ave_sci_iden)
+all_data_stack$scientist[mul_gen_inds] <- ave_sci_iden
+all_data_stack$scientist[mul_gen_inds] <- as.numeric(
+                                          all_data_stack$scientist[mul_gen_inds])
+
+
+## Compute no of male and female references
+#### Not used: 'she', 'shes', 'her', 'hers', 'herself', 'he', 'hes', 'him', 'his', 'himself',
+gender_dict <- dictionary(list(female = c('woman', 'women', 'female', 'females',
+                                          'chairwoman', 'chairwomen',
+                                          'spokeswoman', 'spokeswomen',
+                                          'madam', 'madams', 'lady', 'ladies',
+                                          'girl', 'girls', 'wife', 'wives',
+                                          'mother', 'mothers', 'mum', 'mums',
+                                          'mom', 'moms', 'daughter', 'daughters'),
+                               male = c('man', 'men', 'male', 'males',
+                                        'chairman', 'chairmen', 
+                                        'spokesman', 'spokesmen', 
+                                        'sir', 'sirs', 'gentleman', 'gentlemen',
+                                        'boy', 'boys', 'husband', 'husbands',
+                                        'father', 'fathers', 'dad', 'dads', 
+                                        'son', 'sons')))
+gender_ref <- dfm(stack_corpus, dictionary = gender_dict)
+gender_ref_df <- convert(gender_ref, to = 'data.frame')
+
+
+## Compute average no of quotes for segments with >1 person names
+mean_quotes <- function(num_quotes) {
+  num <- unlist(strsplit(num_quotes, '; '))
+  num <- as.numeric(num)
+  mean_num <- mean(num)
+  return(mean_num)
+}
+ave_num_quotes <- sapply(all_data_stack$no_of_quotes[mul_gen_inds], 
+                         FUN = function(x) mean_quotes(x))
+ave_num_quotes <- unname(ave_num_quotes)
+all_data_stack$no_of_quotes[mul_gen_inds] <- ave_num_quotes
+all_data_stack$no_of_quotes <- as.numeric(all_data_stack$no_of_quotes)
+
+
+## Sentiment Analysis
+stack_corpus_bin <- corpus(all_data_stack[-both_gen_inds,], 
+                           text_field = 'segment_nn')
+stopwds <- c(stopwords('english'), 'shes', 'hes', 'im', 'theyre', 'youre')
+stack_dfm_bin <- dfm(stack_corpus_bin, remove = stopwds, 
+                     remove_punct = TRUE, remove_symbols = TRUE, 
+                     remove_url = TRUE)
+
+senti_bin <- dfm_lookup(dfm_weight(stack_dfm_bin, scheme = 'prop'),
+                        data_dictionary_geninqposneg)
+
+net_senti_bin <- senti_bin[,1] - senti_bin[,2]
+
+head(net_senti_bin)
+
+```
+
+
+### Keyword analysis
+```{r}
+textplot_keyness(textstat_keyness(dfm_group(stack_dfm_bin, groups = 'gender')),
+                 n = 15)
+
+
+## Sub-sample included scientist-only
+stack_corpus_sci <- corpus_subset(stack_corpus_bin, scientist == 1)
+stack_dfm_sci<- dfm(stack_corpus_sci, remove = stopwds, 
+                    remove_punct = TRUE, remove_symbols = TRUE, 
+                    remove_url = TRUE, groups = 'gender')
+
+textplot_keyness(textstat_keyness(stack_dfm_sci), n = 15)
+
+
+## Sub-sample excluded covid19 articles
+covid_filter_bin <- grep('\\b(covid.*19)|(coronavirus(es)?)|(quarantine.?)\\b',
+                         all_data_stack[-both_gen_inds,]$article_original, 
+                         ignore.case = TRUE)
+stack_corpus_covid <- stack_corpus_bin[covid_filter_bin]
+stack_dfm_covid<- dfm(stack_corpus_covid, remove = stopwds, 
+                      remove_punct = TRUE, remove_symbols = TRUE, 
+                      remove_url = TRUE, groups = 'gender')
+
+textplot_keyness(textstat_keyness(stack_dfm_covid), n = 15)
+
+```
+
+
+
+
+
+### Run Multilevel Logistic Regression - Binary data sample
+```{r}
+## Prepare data frame for regression model
+all_data_stack$data_id <- seq(nrow(all_data_stack))
+mod_data <- all_data_stack[,c(19, 13, 1, 16, 9, 11)]
+mod_data$num_words <- unname(num_words)
+mod_data$readability <- readability$Flesch
+mod_data$lex_div <- lex_div$CTTR
+mod_data$female_ref <- gender_ref_df$female
+mod_data$male_ref <- gender_ref_df$male
+# mod_data$pos_in_article <- pos_in_article
+
+## Create binary dataset and randomly sample article segments from each article
+sample_id <- all_data_stack[-both_gen_inds,] %>%
+                   group_by(url) %>%
+                   sample_n(size = 1) %>%
+                   ungroup() %>%
+                   select(data_id)
+
+mod_data_bin <- mod_data[sample_id$data_id,]
+
+## Prepare, mean-centred and scale variables 
+mod_data_bin$gender <- factor(mod_data_bin$gender, levels = c('male', 'female'))
+mod_data_bin$source <- factor(mod_data_bin$source)
+mod_data_bin$scientist <- factor(mod_data_bin$scientist)
+mod_data_bin$net_positive <- net_senti_bin[sample_id$data_id]
+
+mod_data_bin[, c(4, 6:12)] <- lapply(
+                                mod_data_bin[, c(4, 6:12)], 
+                                FUN = function(x) scale(x, center = FALSE,)[,1])
+
+
+## Run multi-level logistic regressinon
+mod_bin <- glmer(gender ~ . -source -data_id + (1|source), data = mod_data_bin, 
+                 family = binomial("logit"),
+                 control = glmerControl(optimizer = "bobyqa",
+                                        optCtrl = list(maxfun = 2e5)))
+summary(mod_bin)
+
+mod_bina <- glm(gender ~ . -source -data_id, data = mod_data_bin, 
+                family = binomial("logit"))
+
+
+```
+
+
+
+### Run Multilevel Logistic Regression - Included only scientists in binary data sample
+```{r}
+## Create dataset and randomly sample article segments from each article
+mod_data_sci <- mod_data_bin[mod_data_bin$scientist == 1, -5]
+
+## Prepare, (re-)mean-centred and (re-)scale variables 
+mod_data_sci[, c(4:11)] <- lapply(
+                              mod_data_sci[, c(4:11)], 
+                              FUN = function(x) scale(x, center = FALSE)[,1])
+
+
+
+## Run multi-level logistic regressinon
+mod_sci <- glmer(gender ~ . -source -data_id + (1|source), data = mod_data_sci,
+                 family = binomial("logit"),
+                 control = glmerControl(optimizer = "bobyqa",
+                                        optCtrl = list(maxfun = 2e5)))
+
+summary(mod_sci)
+
+mod_scia <- glm(gender ~ . -source -data_id, data = mod_data_sci, 
+                family = binomial("logit"))
+```
+
+
+
+### Run Multilevel Logistic Regression - Reomved covid-19 articles from binary dataset
+```{r}
+## Create dataset and randomly sample article segments from each article
+covid_filter <- grep('\\b(covid.*19)|(coronavirus(es)?)|(quarantine.?)\\b',
+                      all_data_stack[sample_id$data_id,]$article_original,
+                     ignore.case = TRUE)
+mod_data_covid <- mod_data_bin[covid_filter,]
+
+## Prepare, (re-)mean-centred and (re-)scale variables 
+mod_data_covid[, c(4, 6:11)] <- lapply(
+                                  mod_data_covid[, c(4, 6:11)], 
+                                  FUN = function(x) scale(x, center = FALSE)[,1])
+
+## Run multi-level logistic regressinon
+mod_covid <- glmer(gender ~ . -source -data_id + (1|source), 
+                   data = mod_data_covid,family = binomial("logit"),
+                   control = glmerControl(optimizer = "bobyqa",
+                                          optCtrl = list(maxfun = 2e5)))
+
+summary(mod_covid)
+
+mod_covida <- glm(gender ~ . -source -data_id, data = mod_data_covid, 
+                  family = binomial("logit"))
+
+```
+
+
+
+
+
+## Conditional Logistic Regression (Comparing male and female segments from the same article)
+
+### Run Conditional Logistic Regression - Binary data sample
+```{r}
+## Created paired data
+mod_data_clogit <- data.frame(mod_data)
+mod_data_clogit$url <- all_data_stack$url
+dup_inds <- duplicated(mod_data_clogit[-both_gen_inds, 'url'])|
+                  duplicated(mod_data_clogit[-both_gen_inds, 'url'], 
+                             fromLast = TRUE)
+
+clogit_data <- mod_data_clogit[-both_gen_inds,][dup_inds,] %>%
+                 mutate(net_positive = net_senti_bin[dup_inds,1]) %>%
+                 group_by(url, gender) %>%
+                 sample_n(size = 1) %>%
+                 group_by(url) %>%
+                 mutate(seg_count = n()) %>%
+                 filter(seg_count > 1) %>%
+                 ungroup() %>%
+                 select(-c(seg_count, source, url, total_no_of_persons))
+
+clogit_data$data_id <- rep(1:(nrow(clogit_data)/2), each = 2)
+
+
+## Prepare, mean-centred and scale variables 
+clogit_data$gender <- clogit_data$gender == 'female'
+clogit_data$scientist <- factor(clogit_data$scientist)
+
+clogit_data[, 4:10] <- lapply(
+                        clogit_data[, 4:10], 
+                        FUN = function(x) scale(x, center = FALSE)[,1])
+
+## Run multi-level logistic regression
+clogit_mod <- clogit(gender ~ . -data_id + strata(data_id), data = clogit_data)
+
+summary(clogit_mod)
+```
+
+
+
+
+### Run Conditional Logistic Regression - Removed covid-19 articles from binary data sample
+```{r}
+covid_filter_cl <- grep(
+                    '\\b(covid.*19)|(coronavirus(es)?)|(quarantine.?)\\b',
+                    all_data_stack[-both_gen_inds,][dup_inds,]$article_original,
+                    ignore.case = TRUE)
+
+clogit_data_covid <- mod_data_clogit %>%
+                       slice(-both_gen_inds) %>%
+                       mutate(net_positive = net_senti_bin[,1]) %>%
+                       filter(dup_inds) %>%
+                       slice(-covid_filter_cl) %>%
+                       group_by(url, gender) %>%
+                       sample_n(size = 1) %>%
+                       group_by(url) %>%
+                       mutate(seg_count = n()) %>%
+                       filter(seg_count > 1) %>%
+                       ungroup() %>%
+                       select(-c(seg_count, source, url, total_no_of_persons))
+clogit_data_covid$data_id <- rep(1:(nrow(clogit_data_covid)/2), each = 2)
+
+## Prepare, (re-)mean-centred and (re-)scale variables 
+clogit_data_covid$gender <- clogit_data_covid$gender == 'female'
+clogit_data_covid$scientist <- factor(clogit_data_covid$scientist)
+
+clogit_data_covid[, 4:10] <- lapply(
+                              clogit_data_covid[, 4:10], 
+                              FUN = function(x) scale(x, center = FALSE)[,1])
+
+## Run multi-level logistic regressinon
+clogit_mod_covid <- clogit(gender ~ . -data_id + strata(data_id), 
+                           data = clogit_data_covid) 
+
+summary(clogit_mod_covid)
+```
+
+
+
+## All Quality Results
+```{r}
+## Keyword analysis
+pdf(file = 'graphs_capstone/keyword_analyses.pdf', height = 4)
+textplot_keyness(textstat_keyness(dfm_group(stack_dfm_bin, 'gender')), 
+                 n = 15, labelsize = 3.5)
+
+textplot_keyness(textstat_keyness(stack_dfm_sci), n = 15, labelsize = 3.5)
+textplot_keyness(textstat_keyness(stack_dfm_covid), n = 15, labelsize = 3.5)
+dev.off()
+
+## Mixed-effects Logistic Regression
+summary(mod_bin)
+summary(mod_sci)
+summary(mod_covid)
+
+set.seed(1)
+numCores <- detectCores()
+cl <- makeCluster(numCores)
+clusterEvalQ(cl, library("lme4"))
+b_mod_bin <- bootMer(x = mod_bin, FUN = fixef, nsim = 1000,
+                     parallel = 'multicore', ncpus = 6)
+
+set.seed(1)
+b_mod_sci <- bootMer(mod_sci, FUN = fixef, nsim = 1000,
+                     parallel = 'multicore', ncpus = 6)
+
+set.seed(1)
+b_mod_covid <- bootMer(mod_covid, FUN = fixef, nsim = 1000,
+                       parallel = 'multicore', ncpus = 6)
+
+stopCluster(cl)
+
+
+
+## Create fixed effects results dataframe
+create_results_df <- function(b_mod, num_term = 10) {
+  stat <- data.frame(row.names = names(b_mod$t0))
+  stat$Estimate <- b_mod$t0
+  stat$SE <- apply(b_mod$t, 2, sd)
+  ci <- lapply(1:num_term, FUN = function(x) boot.ci(b_mod, type='perc', index=x))
+  stat$LCI <- sapply(1:num_term, FUN = function(x) ci[[x]]$percent[4])
+  stat$UCI <- sapply(1:num_term, FUN = function(x) ci[[x]]$percent[5])
+  p = rbind((1-apply(b_mod$t<0, 2, mean))*2, (1-apply(b_mod$t>0, 2, mean))*2)
+  stat$p <- apply(p, 2, min)
+  return(stat)
+}
+
+
+stat_bin <- create_results_df(b_mod_bin)
+stat_sci <- create_results_df(b_mod_sci, 9)
+stat_covid <- create_results_df(b_mod_covid)
+
+## Reorder rows
+pred_labels <- c('Intercept', 'No. of words', 'Readibility','Lexical diversity',
+                 'No. of female references', 'No. of male references',
+                 'Net positive sentiment', 'Scientist', 'No. of quotes', 
+                 'No. of co-occurring persons')
+names(pred_labels) <- c('(Intercept)', 'num_words', 'readability', 'lex_div',
+                        'female_ref', 'male_ref', 'net_positive', 'scientist1',
+                        'no_of_quotes', 'total_no_of_persons')
+
+stat_bin <- stat_bin[match(names(pred_labels), rownames(stat_bin)),]
+rownames(stat_bin) <- pred_labels
+
+stat_sci <- stat_sci[match(names(pred_labels[-8]), rownames(stat_sci)),]
+rownames(stat_sci) <- pred_labels[-8]
+
+stat_covid <- stat_covid[match(names(pred_labels), rownames(stat_covid)),]
+rownames(stat_covid) <- pred_labels
+
+## Create html tables
+tab_df(stat_bin, use.viewer=FALSE, digits = 3)
+tab_df(stat_sci, use.viewer=FALSE, digits = 3)
+tab_df(stat_covid, use.viewer=FALSE, digits = 3)
+
+
+## Create random effects results dataframe
+anova(mod_bin, mod_bina)
+anova(mod_sci, mod_scia)
+anova(mod_covid, mod_covida)
+
+
+
+stat_ranef <- data.frame(row.names = c('Variance', 'ICC'))
+stat_ranef$FD <- c(unlist(summary(mod_bin)$varcor),
+                   performance::icc(mod_bin)[[1]])
+stat_ranef$SS1 <- c(unlist(summary(mod_sci)$varcor),
+                    performance::icc(mod_sci)[[1]])
+stat_ranef$SS2 <- c(unlist(summary(mod_covid)$varcor),
+                    performance::icc(mod_covid)[[1]])
+tab_df(stat_ranef, use.viewer = FALSE, digits = 4)
+
+
+
+```
+
+
+
+```{r}
+## Conditional Logistic Regression
+summary(clogit_mod)
+summary(clogit_mod_covid)
+
+
+## Create results dataframe
+create_results_df_c <- function(clogitmod) {
+  stat <- data.frame(row.names = names(coef(clogitmod)))
+  mod_summary <- summary(clogitmod)
+  stat$Estimate <- mod_summary$coefficients[,1]
+  stat$SE <- mod_summary$coefficients[,3]
+  stat$LCI <- confint(clogitmod)[,1]
+  stat$UCI <- confint(clogitmod)[,2]
+  stat$p <- mod_summary$coefficients[,5]
+  return(stat)
+}
+
+stat_clogit <- create_results_df_c(clogit_mod)
+stat_clogit_covid <- create_results_df_c(clogit_mod_covid)
+
+stat_clogit <- stat_clogit[match(names(pred_labels[-c(1, 10)]),
+                                 rownames(stat_clogit)),]
+rownames(stat_clogit) <- pred_labels[-c(1,10)]
+
+stat_clogit_covid <- stat_clogit_covid[match(names(pred_labels[-c(1, 10)]),
+                                       rownames(stat_clogit_covid)),]
+rownames(stat_clogit_covid) <- pred_labels[-c(1,10)]
+
+tab_df(stat_clogit, use.viewer = FALSE, digits = 3)
+tab_df(stat_clogit_covid, use.viewer = FALSE, digits = 3)
+
+
+
+```
+
+
+
+
+
+
